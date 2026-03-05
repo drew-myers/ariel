@@ -7,8 +7,115 @@ import {
   renderMermaidSVG,
   THEMES,
 } from "beautiful-mermaid";
-import type { AsciiRenderOptions } from "beautiful-mermaid";
+import type { AsciiRenderOptions, AsciiTheme } from "beautiful-mermaid";
 import type { DiagramColors } from "beautiful-mermaid";
+
+// ============================================================================
+// Terminal background detection
+// ============================================================================
+
+const DARK_ASCII_THEME: AsciiTheme = {
+  fg: "#d4d4d8", // zinc-300 — bright text for dark backgrounds
+  border: "#a1a1aa", // zinc-400
+  line: "#71717a", // zinc-500
+  arrow: "#a1a1aa", // zinc-400
+  corner: "#71717a",
+  junction: "#a1a1aa",
+};
+
+const LIGHT_ASCII_THEME: AsciiTheme = {
+  fg: "#27272a", // zinc-800 — dark text for light backgrounds
+  border: "#a1a1aa", // zinc-400
+  line: "#71717a", // zinc-500
+  arrow: "#52525b", // zinc-600
+  corner: "#71717a",
+  junction: "#a1a1aa",
+};
+
+/**
+ * Detect whether the terminal has a dark or light background.
+ *
+ * Strategy:
+ * 1. OSC 11 query — asks the terminal for its actual background color
+ * 2. COLORFGBG env var — set by some terminals (e.g. rxvt, xterm)
+ * 3. Default to dark (most common terminal setup)
+ */
+async function detectDarkBackground(): Promise<boolean> {
+  // Only attempt detection on a TTY
+  if (!process.stderr.isTTY) return true;
+
+  // Try OSC 11 query first (most reliable)
+  try {
+    const result = await queryTerminalBackground(200);
+    if (result !== null) return result;
+  } catch {
+    // Fall through
+  }
+
+  // Try COLORFGBG env var (format: "fg;bg" where bg >= 8 is usually dark)
+  const colorfgbg = process.env.COLORFGBG;
+  if (colorfgbg) {
+    const parts = colorfgbg.split(";");
+    const bg = parseInt(parts[parts.length - 1]!, 10);
+    if (!isNaN(bg)) {
+      // In 16-color palette: 0-6 are dark, 7-15 are light
+      return bg < 7;
+    }
+  }
+
+  // Default to dark
+  return true;
+}
+
+/**
+ * Query the terminal's background color using OSC 11.
+ * Returns true for dark, false for light, null if detection failed.
+ */
+function queryTerminalBackground(timeoutMs: number): Promise<boolean | null> {
+  return new Promise((resolve) => {
+    const timer = setTimeout(() => {
+      cleanup();
+      resolve(null);
+    }, timeoutMs);
+
+    const stdin = process.stdin;
+    const wasRaw = stdin.isRaw;
+
+    function cleanup() {
+      clearTimeout(timer);
+      stdin.removeListener("data", onData);
+      if (stdin.isRaw !== wasRaw) {
+        stdin.setRawMode(wasRaw);
+      }
+      // Unpause stdin if we paused it — prevents hanging
+      stdin.pause();
+    }
+
+    function onData(data: Buffer) {
+      const str = data.toString();
+      // Response format: ESC ] 11 ; rgb:RRRR/GGGG/BBBB ESC \ (or BEL)
+      const match = str.match(
+        /\]11;rgb:([0-9a-fA-F]+)\/([0-9a-fA-F]+)\/([0-9a-fA-F]+)/
+      );
+      if (match) {
+        // Parse the first 2 hex digits of each component (they're 16-bit values)
+        const r = parseInt(match[1]!.slice(0, 2), 16);
+        const g = parseInt(match[2]!.slice(0, 2), 16);
+        const b = parseInt(match[3]!.slice(0, 2), 16);
+        const luminance = (r * 299 + g * 587 + b * 114) / 1000;
+        cleanup();
+        resolve(luminance < 140);
+      }
+    }
+
+    stdin.on("data", onData);
+    stdin.setRawMode(true);
+    stdin.resume();
+
+    // Send OSC 11 query: "what is your background color?"
+    process.stderr.write("\x1b]11;?\x07");
+  });
+}
 
 // ============================================================================
 // Argument parsing
@@ -69,6 +176,8 @@ Options:
   --ascii                   Use ASCII characters (+,-,|) instead of Unicode
   --color <mode>            Color mode: auto, none, ansi16, ansi256, truecolor
                             (default: auto)
+  --dark                    Force dark-background theme (auto-detected by default)
+  --light                   Force light-background theme
   --theme <name>            Theme for SVG output (use --list-themes to see all)
   -o, --output <file>       Write output to file instead of stdout
   --padding-x <n>           Horizontal spacing between nodes (default: 5)
@@ -184,9 +293,17 @@ try {
       process.exit(1);
     }
 
+    // Auto-detect terminal background for theme selection
+    const isDarkBg = hasFlag("--light")
+      ? false
+      : hasFlag("--dark")
+        ? true
+        : await detectDarkBackground();
+
     const opts: AsciiRenderOptions = {
       useAscii: hasFlag("--ascii"),
       colorMode: colorMode as AsciiRenderOptions["colorMode"],
+      theme: isDarkBg ? DARK_ASCII_THEME : LIGHT_ASCII_THEME,
       paddingX: getFlagValue("--padding-x")
         ? parseInt(getFlagValue("--padding-x")!)
         : undefined,
