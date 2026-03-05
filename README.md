@@ -43,6 +43,9 @@ ariel diagram.mmd --color none        # plain text, no ANSI
 ariel diagram.mmd --color truecolor   # 24-bit RGB
 ```
 
+Example agent instruction:
+>`ariel` is available on PATH for rendering Mermaid diagrams. Use it to visualize data flows, architecture, state machines, etc. See the --help for details.
+
 ## Build
 
 Requires [Bun](https://bun.sh).
